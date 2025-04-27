@@ -1,6 +1,6 @@
 import time
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import subprocess
 import json
@@ -266,6 +266,115 @@ def get_next_model_to_rotate() -> Optional[str]:
     
     return None
 
+def get_job_start_time(job_id: str) -> Optional[datetime]:
+    """获取作业的开始时间"""
+    try:
+        result = subprocess.run(
+            f"sacct -j {job_id} --format=JobID,Start,State -n",
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            for line in lines:
+                if line.strip():
+                    parts = line.split('|')
+                    if len(parts) >= 3:
+                        job_id_part, start_time, state = parts
+                        if state.strip() == 'RUNNING':
+                            try:
+                                return datetime.strptime(start_time.strip(), '%Y-%m-%dT%H:%M:%S')
+                            except ValueError:
+                                logging.error(f"无法解析时间格式: {start_time}")
+        return None
+    except Exception as e:
+        logging.error(f"获取作业开始时间失败: {str(e)}")
+        return None
+
+def get_pending_jobs() -> Dict[str, Dict]:
+    """获取所有等待中的作业及其节点信息"""
+    try:
+        result = subprocess.run(
+            "squeue -t PD -o '%.18i %.9P %.8j %.8u %.2t %.10M %.6D %R'",
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            pending_jobs = {}
+            lines = result.stdout.strip().split('\n')[1:]  # 跳过标题行
+            for line in lines:
+                parts = line.split()
+                if len(parts) >= 8:
+                    job_id = parts[0]
+                    job_name = parts[2]
+                    node = parts[7]
+                    pending_jobs[job_name] = {
+                        'job_id': job_id,
+                        'node': node
+                    }
+            return pending_jobs
+        return {}
+    except Exception as e:
+        logging.error(f"获取等待中作业失败: {str(e)}")
+        return {}
+
+def should_stop_model_for_pending(model_name: str, node_name: str) -> bool:
+    """检查是否应该停止模型以为等待中的任务让路"""
+    state = model_states[model_name]
+    if not state['job_id']:
+        return False
+    
+    # 获取模型运行时间
+    start_time = get_job_start_time(state['job_id'])
+    if not start_time:
+        return False
+    
+    running_time = datetime.now() - start_time
+    if running_time < timedelta(hours=12):
+        return False
+    
+    # 获取等待中的作业
+    pending_jobs = get_pending_jobs()
+    
+    # 检查是否有等待中的作业指定了该节点
+    for job_name, job_info in pending_jobs.items():
+        if job_info['node'] == node_name:
+            logging.info(f"发现等待中的作业 {job_name} 指定了节点 {node_name}，且模型 {model_name} 已运行 {running_time.total_seconds()/3600:.1f} 小时")
+            return True
+    
+    return False
+
+def stop_model_job(model_name: str) -> bool:
+    """停止模型作业"""
+    state = model_states[model_name]
+    if not state['job_id']:
+        return False
+    
+    try:
+        result = subprocess.run(
+            f"scancel {state['job_id']}",
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            logging.info(f"成功停止模型 {model_name} 的作业 {state['job_id']}")
+            state['is_available'] = False
+            state['job_id'] = None
+            state['node_name'] = None
+            return True
+        else:
+            logging.error(f"停止模型 {model_name} 失败: {result.stderr}")
+            return False
+    except Exception as e:
+        logging.error(f"停止模型作业时发生错误: {str(e)}")
+        return False
+
 def rotate_models():
     """轮换模型可用状态"""
     try:
@@ -282,6 +391,15 @@ def rotate_models():
         # 获取已使用的节点
         used_nodes = set(job_info['node'] for job_info in job_status.values() if job_info['status'] in ['R', 'PD'])
         logging.info(f"当前已使用的节点: {', '.join(used_nodes) if used_nodes else '无'}")
+        
+        # 检查是否需要为等待中的任务停止模型
+        for model_name, state in model_states.items():
+            if state['is_available'] and state['node_name']:
+                if should_stop_model_for_pending(model_name, state['node_name']):
+                    logging.info(f"模型 {model_name} 需要为等待中的任务让路")
+                    if stop_model_job(model_name):
+                        running_models -= 1
+                        used_nodes.remove(state['node_name'])
         
         # 获取下一个应该轮换的模型
         next_model = get_next_model_to_rotate()
