@@ -34,7 +34,9 @@ function Chat({ getToken, setToken }) {
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [showAgreement, setShowAgreement] = useState(false);
   const [isResponding, setIsResponding] = useState(false);
-  const [announcement, setAnnouncement] = useState('');
+  const [announcement, setAnnouncement] = useState("暂无公告");
+  const [announcementEndTime, setAnnouncementEndTime] = useState(null);
+  const [remainingTime, setRemainingTime] = useState('');
   const messagesEndRef = useRef(null);
   const abortControllerRef = useRef(null);
   const navigate = useNavigate();
@@ -144,40 +146,74 @@ function Chat({ getToken, setToken }) {
     const fetchAnnouncement = async () => {
       try {
         const token = getToken();
-        console.log('Token:', token); // 输出token
-        
         if (!token) {
-          console.log('No token available');
           return;
         }
         
-        console.log('Fetching announcement...');
         const response = await axios.get(`${config.API_BASE_URL}/api/admin/announcement`, {
           headers: {
             Authorization: `Bearer ${token}`
           }
         });
-        console.log('Announcement response:', response.data);
-        const content = response.data.content;
-        console.log('Setting announcement content:', content);
-        setAnnouncement(content || '');
+        
+        // 确保返回的数据存在且有content字段
+        if (response.data && response.data.content) {
+          const { content, display_end } = response.data;
+          
+          // 检查是否有内容，有则设置公告和结束时间，没有则显示"暂无公告"
+          if (content && content.trim() !== '') {
+            setAnnouncement(content);
+            if (display_end) {
+              setAnnouncementEndTime(new Date(display_end));
+            }
+          } else {
+            setAnnouncement("暂无公告");
+            setAnnouncementEndTime(null);
+            setRemainingTime('');
+          }
+        } else {
+          setAnnouncement("暂无公告");
+          setAnnouncementEndTime(null);
+          setRemainingTime('');
+        }
       } catch (error) {
         console.error('Error fetching announcement:', error);
-        console.error('Error details:', {
-          message: error.message,
-          response: error.response?.data,
-          status: error.response?.status,
-          headers: error.response?.headers
-        });
-        setAnnouncement('');
+        setAnnouncement("暂无公告");
+        setAnnouncementEndTime(null);
+        setRemainingTime('');
       }
     };
 
     fetchAnnouncement();
-    // 每5秒更新一次公告
     const interval = setInterval(fetchAnnouncement, 5000);
     return () => clearInterval(interval);
   }, [getToken]);
+
+  useEffect(() => {
+    const updateRemainingTime = () => {
+      if (!announcementEndTime) {
+        setRemainingTime('');
+        return;
+      }
+
+      const now = new Date();
+      const diff = announcementEndTime - now;
+      
+      if (diff <= 0) {
+        setRemainingTime('');
+        setAnnouncement("暂无公告");
+        setAnnouncementEndTime(null);
+        return;
+      }
+
+      const minutes = Math.floor(diff / 60000);
+      const seconds = Math.floor((diff % 60000) / 1000);
+      setRemainingTime(`${minutes}分${seconds}秒`);
+    };
+
+    const timer = setInterval(updateRemainingTime, 1000);
+    return () => clearInterval(timer);
+  }, [announcementEndTime]);
 
   // 当聊天历史变化时自动保存
   useEffect(() => {
@@ -783,7 +819,7 @@ function Chat({ getToken, setToken }) {
               whiteSpace: 'nowrap'
             }}
           >
-            公告：{announcement || '暂无公告'}
+            公告：{announcement} {remainingTime && `(剩余时间：${remainingTime})`}
           </Typography>
         </Box>
       </Box>

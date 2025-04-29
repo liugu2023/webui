@@ -412,29 +412,48 @@ def get_announcement():
     try:
         db = get_db()
         cursor = db.cursor()
-        # 只获取15分钟内的最新公告
+        
+        # 自动禁用已过期的公告
         cursor.execute('''
-            SELECT content FROM announcements 
-            WHERE datetime(created_at) > datetime('now', '-15 minutes')
+            UPDATE announcements 
+            SET is_active = 0
+            WHERE datetime(display_end) < datetime('now') AND is_active = 1
+        ''')
+        db.commit()
+        
+        # 获取当前时间在显示时间范围内且启用的最新公告
+        cursor.execute('''
+            SELECT content, display_start, display_end FROM announcements 
+            WHERE datetime('now') BETWEEN datetime(display_start) AND datetime(display_end)
+            AND is_active = 1
             ORDER BY created_at DESC LIMIT 1
         ''')
         result = cursor.fetchone()
         
-        print('Announcement query result:', result)
-        print('Result type:', type(result))
-        print('Result keys:', result.keys() if result else None)
-        print('Result values:', list(result) if result else None)
-        
         if result:
             content = result['content']
-            print('Content:', content)
-            return jsonify({'content': content})
+            display_start = result['display_start']
+            display_end = result['display_end']
+            return jsonify({
+                'content': content,
+                'display_start': display_start,
+                'display_end': display_end
+            })
         else:
-            print('No announcement found')
-            return jsonify({'content': ''})
+            # 返回空内容但确保结构一致
+            return jsonify({
+                'content': '',
+                'display_start': None,
+                'display_end': None
+            })
     except Exception as e:
         print('Error in get_announcement:', str(e))
-        return jsonify({'content': ''}), 500
+        # 返回空内容但确保结构一致
+        return jsonify({
+            'content': '',
+            'display_start': None,
+            'display_end': None
+        }), 500
 
 # 更新公告内容
 @app.route('/api/admin/announcement', methods=['POST'])
@@ -450,8 +469,19 @@ def update_announcement():
     if not result or not result['is_admin']:
         return jsonify({'error': '需要管理员权限'}), 403
     
-    content = request.json.get('content', '')
-    cursor.execute('INSERT INTO announcements (content) VALUES (?)', (content,))
+    data = request.json
+    content = data.get('content', '')
+    display_start = data.get('display_start')
+    display_end = data.get('display_end')
+    is_active = data.get('is_active', True)
+    
+    if not all([content, display_start, display_end]):
+        return jsonify({'error': '请填写所有必填字段'}), 400
+        
+    cursor.execute('''
+        INSERT INTO announcements (content, display_start, display_end, is_active)
+        VALUES (?, ?, ?, ?)
+    ''', (content, display_start, display_end, is_active))
     db.commit()
     
     return jsonify({'message': '公告更新成功'})
@@ -513,6 +543,119 @@ def update_agreement():
         
         return jsonify({'message': '协议内容更新成功'})
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# 获取所有公告
+@app.route('/api/admin/announcements', methods=['GET'])
+@jwt_required()
+def get_announcements():
+    try:
+        current_user = get_jwt_identity()
+        db = get_db()
+        cursor = db.cursor()
+        
+        # 检查用户是否是管理员
+        cursor.execute('SELECT is_admin FROM users WHERE username = ?', (current_user,))
+        result = cursor.fetchone()
+        if not result or not result['is_admin']:
+            return jsonify({'error': '需要管理员权限'}), 403
+            
+        # 自动禁用已过期的公告
+        cursor.execute('''
+            UPDATE announcements 
+            SET is_active = 0
+            WHERE datetime(display_end) < datetime('now') AND is_active = 1
+        ''')
+        db.commit()
+            
+        cursor.execute('''
+            SELECT id, content, display_start, display_end, is_active, created_at
+            FROM announcements 
+            ORDER BY created_at DESC
+        ''')
+        announcements = cursor.fetchall()
+        
+        return jsonify([{
+            'id': row['id'],
+            'content': row['content'],
+            'display_start': row['display_start'],
+            'display_end': row['display_end'],
+            'is_active': bool(row['is_active']),
+            'created_at': row['created_at']
+        } for row in announcements])
+    except Exception as e:
+        print('Error in get_announcements:', str(e))
+        return jsonify({'error': str(e)}), 500
+
+# 删除公告
+@app.route('/api/admin/announcement/<int:announcement_id>', methods=['DELETE'])
+@jwt_required()
+def delete_announcement(announcement_id):
+    try:
+        current_user = get_jwt_identity()
+        db = get_db()
+        cursor = db.cursor()
+        
+        # 检查用户是否是管理员
+        cursor.execute('SELECT is_admin FROM users WHERE username = ?', (current_user,))
+        result = cursor.fetchone()
+        if not result or not result['is_admin']:
+            return jsonify({'error': '需要管理员权限'}), 403
+            
+        # 检查公告是否存在
+        cursor.execute('SELECT id FROM announcements WHERE id = ?', (announcement_id,))
+        if not cursor.fetchone():
+            return jsonify({'error': '公告不存在'}), 404
+            
+        # 删除公告
+        cursor.execute('DELETE FROM announcements WHERE id = ?', (announcement_id,))
+        db.commit()
+        
+        return jsonify({'message': '公告删除成功'})
+    except Exception as e:
+        print('Error in delete_announcement:', str(e))
+        return jsonify({'error': str(e)}), 500
+
+# 更新公告
+@app.route('/api/admin/announcement/<int:announcement_id>', methods=['PUT'])
+@jwt_required()
+def update_announcement_by_id(announcement_id):
+    try:
+        current_user = get_jwt_identity()
+        db = get_db()
+        cursor = db.cursor()
+        
+        # 检查用户是否是管理员
+        cursor.execute('SELECT is_admin FROM users WHERE username = ?', (current_user,))
+        result = cursor.fetchone()
+        if not result or not result['is_admin']:
+            return jsonify({'error': '需要管理员权限'}), 403
+            
+        # 检查公告是否存在
+        cursor.execute('SELECT id FROM announcements WHERE id = ?', (announcement_id,))
+        if not cursor.fetchone():
+            return jsonify({'error': '公告不存在'}), 404
+            
+        data = request.json
+        content = data.get('content')
+        display_start = data.get('display_start')
+        display_end = data.get('display_end')
+        is_active = data.get('is_active')
+        
+        if not all([content, display_start, display_end]):
+            return jsonify({'error': '请填写所有必填字段'}), 400
+            
+        # 更新公告
+        cursor.execute('''
+            UPDATE announcements 
+            SET content = ?, display_start = ?, display_end = ?, is_active = ?
+            WHERE id = ?
+        ''', (content, display_start, display_end, is_active, announcement_id))
+        db.commit()
+        
+        return jsonify({'message': '公告更新成功'})
+    except Exception as e:
+        print('Error in update_announcement_by_id:', str(e))
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
